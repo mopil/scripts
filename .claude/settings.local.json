@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(python:*)",
+      "WebSearch",
+      "WebFetch(domain:cryptoquant.com)",
+      "WebFetch(domain:paohuee.medium.com)",
+      "WebFetch(domain:intercom.help)",
+      "WebFetch(domain:dataguide.cryptoquant.com)",
+      "Bash(timeout:*)"
+    ]
+  }
+}
