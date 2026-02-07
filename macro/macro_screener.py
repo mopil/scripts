@@ -29,6 +29,18 @@ INDICATORS = {
     "wti":     {"symbol": "CL=F",     "name": "Crude Oil (WTI)",   "fmt": "${:,.2f}"},
     "copper":  {"symbol": "HG=F",     "name": "Copper",            "fmt": "${:.4f}"},
     "btc":     {"symbol": "BTC-USD",  "name": "Bitcoin",           "fmt": "${:,.0f}"},
+    # 섹터 ETF
+    "xlk":     {"symbol": "XLK",     "name": "Technology",        "fmt": "${:,.2f}"},
+    "xlf":     {"symbol": "XLF",     "name": "Financials",        "fmt": "${:,.2f}"},
+    "xly":     {"symbol": "XLY",     "name": "Cons. Discret.",    "fmt": "${:,.2f}"},
+    "xli":     {"symbol": "XLI",     "name": "Industrials",       "fmt": "${:,.2f}"},
+    "xlb":     {"symbol": "XLB",     "name": "Materials",         "fmt": "${:,.2f}"},
+    "xle":     {"symbol": "XLE",     "name": "Energy",            "fmt": "${:,.2f}"},
+    "xlu":     {"symbol": "XLU",     "name": "Utilities",         "fmt": "${:,.2f}"},
+    "xlv":     {"symbol": "XLV",     "name": "Health Care",       "fmt": "${:,.2f}"},
+    "xlp":     {"symbol": "XLP",     "name": "Cons. Staples",     "fmt": "${:,.2f}"},
+    "xlre":    {"symbol": "XLRE",    "name": "Real Estate",       "fmt": "${:,.2f}"},
+    "xlc":     {"symbol": "XLC",     "name": "Communication",     "fmt": "${:,.2f}"},
 }
 
 SECTIONS = [
@@ -36,13 +48,26 @@ SECTIONS = [
     ("통화",     ["dxy", "usdjpy", "usdkrw"]),
     ("변동성",   ["vix"]),
     ("미국 시장", ["sp500", "nasdaq", "russell"]),
+    ("섹터 (공격)", ["xlk", "xlf", "xly", "xli", "xlb", "xle"]),
+    ("섹터 (방어)", ["xlu", "xlv", "xlp"]),
+    ("섹터 (보조)", ["xlre", "xlc"]),
     ("한국 시장", ["kospi", "kosdaq"]),
     ("원자재",   ["gold", "silver", "wti", "copper"]),
     ("크립토",   ["btc"]),
 ]
 
-SCRIPT_DIR = pathlib.Path(__file__).resolve().parent.parent.parent  # ddd/
-HISTORY_DIR = SCRIPT_DIR / "macro" / "history"
+CYCLE_PHASES = {
+    "초기 회복": {"leaders": ["xlk", "xlf", "xly"], "laggards": ["xle", "xlb"]},
+    "중기 확장": {"leaders": ["xli", "xlb", "xle"], "laggards": ["xlu", "xlp"]},
+    "후기 과열": {"leaders": ["xle", "xlb"],         "laggards": ["xlk", "xlf", "xly"]},
+    "침체/방어": {"leaders": ["xlu", "xlv", "xlp"],   "laggards": ["xly", "xlk", "xli"]},
+}
+
+OFFENSIVE_SECTORS = ["xlk", "xlf", "xly", "xli", "xlb", "xle"]
+DEFENSIVE_SECTORS = ["xlu", "xlv", "xlp"]
+
+SCRIPT_DIR = pathlib.Path(__file__).resolve().parent  # scripts/macro/
+HISTORY_DIR = SCRIPT_DIR / "history"
 
 _errors = []
 
@@ -133,7 +158,7 @@ def _json_default(obj):
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
-def save_history(indicators, sentiment_label, reasons):
+def save_history(indicators, sentiment_label, reasons, cycle_phase=None, cycle_details=None):
     """오늘 데이터를 macro/history/yyyy_mm_dd.json으로 저장"""
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     today = datetime.now(timezone.utc)
@@ -144,6 +169,8 @@ def save_history(indicators, sentiment_label, reasons):
         "timestamp": today.isoformat(),
         "sentiment": sentiment_label,
         "reasons": reasons,
+        "cycle_phase": cycle_phase,
+        "cycle_details": cycle_details,
         "indicators": indicators,
     }
 
@@ -232,6 +259,67 @@ def fmt_ma200(vs_ma200):
         return "N/A"
     arrow = "▲" if vs_ma200 >= 0 else "▼"
     return f"{arrow}{abs(vs_ma200):.1f}%"
+
+
+# ── 경기사이클 판정 ──────────────────────────────────────────────────────────
+def assess_cycle(indicators):
+    """섹터 로테이션 기반 경기국면 판정
+
+    Returns: (phase_label, details_list, offensive_avg, defensive_avg)
+    """
+    # 각 섹터의 vs_ma200 수집
+    sector_ma200 = {}
+    for key in list(OFFENSIVE_SECTORS) + list(DEFENSIVE_SECTORS) + ["xlre", "xlc"]:
+        ind = indicators.get(key)
+        if ind and ind["vs_ma200"] is not None:
+            sector_ma200[key] = ind["vs_ma200"]
+
+    if not sector_ma200:
+        return "판정 불가", ["섹터 데이터 부족"], None, None
+
+    # 각 국면별 점수 계산
+    phase_scores = {}
+    for phase, cfg in CYCLE_PHASES.items():
+        score = 0
+        leader_vals = []
+        for k in cfg["leaders"]:
+            v = sector_ma200.get(k)
+            if v is not None:
+                leader_vals.append(v)
+                if v > 0:
+                    score += 1
+        for k in cfg["laggards"]:
+            v = sector_ma200.get(k)
+            if v is not None:
+                if v < 0:
+                    score += 1
+        # leaders의 평균 vs_ma200로 가중
+        if leader_vals:
+            avg_leader = sum(leader_vals) / len(leader_vals)
+            score += avg_leader / 10  # 10%당 +1점 가중
+        phase_scores[phase] = score
+
+    # 최고 점수 국면
+    best_phase = max(phase_scores, key=phase_scores.get)
+
+    # 공격형 vs 방어형 평균
+    off_vals = [sector_ma200[k] for k in OFFENSIVE_SECTORS if k in sector_ma200]
+    def_vals = [sector_ma200[k] for k in DEFENSIVE_SECTORS if k in sector_ma200]
+    offensive_avg = sum(off_vals) / len(off_vals) if off_vals else None
+    defensive_avg = sum(def_vals) / len(def_vals) if def_vals else None
+
+    # 상세 정보
+    details = []
+    # 강세 섹터 (vs_ma200 상위)
+    sorted_sectors = sorted(sector_ma200.items(), key=lambda x: x[1], reverse=True)
+    strong = [f"{INDICATORS[k]['name']}({v:+.1f}%)" for k, v in sorted_sectors if v > 0]
+    weak = [f"{INDICATORS[k]['name']}({v:+.1f}%)" for k, v in sorted_sectors if v < 0]
+    if strong:
+        details.append("강세: " + ", ".join(strong[:3]))
+    if weak:
+        details.append("약세: " + ", ".join(weak[:3]))
+
+    return best_phase, details, offensive_avg, defensive_avg
 
 
 # ── 매크로 심리 판정 ──────────────────────────────────────────────────────────
@@ -328,6 +416,17 @@ def assess_sentiment(indicators):
         else:
             reasons.append(f"BTC MA200 아래 ({btc['vs_ma200']:.1f}%)")
 
+    # 9) 경기사이클 판정
+    cycle_phase, _, _, _ = assess_cycle(indicators)
+    if cycle_phase in ("초기 회복", "중기 확장"):
+        score += 1
+        reasons.append(f"경기사이클: {cycle_phase} (확장)")
+    elif cycle_phase == "침체/방어":
+        score -= 1
+        reasons.append(f"경기사이클: {cycle_phase} (수축)")
+    elif cycle_phase == "후기 과열":
+        reasons.append(f"경기사이클: {cycle_phase} (경계)")
+
     # 판정
     if score >= 2:
         label = "[+] Risk-On (위험선호)"
@@ -377,7 +476,7 @@ def _print_period_changes(indicators, W):
 
 
 # ── 대시보드 출력 ─────────────────────────────────────────────────────────────
-def print_dashboard(indicators):
+def print_dashboard(indicators, cycle_result=None):
     """대시보드 출력 후 (sentiment, reasons) 튜플 반환"""
     W = 74
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -411,6 +510,15 @@ def print_dashboard(indicators):
     print("-" * W)
     print(f" 매크로 심리: {sentiment}")
     print(f" 근거: {' / '.join(reasons)}")
+
+    # 경기사이클 판정 출력
+    if cycle_result:
+        phase, details, off_avg, def_avg = cycle_result
+        off_str = f"{off_avg:+.1f}%" if off_avg is not None else "N/A"
+        def_str = f"{def_avg:+.1f}%" if def_avg is not None else "N/A"
+        print(f" 경기 국면: [{phase}] (공격형 avg {off_str} vs 방어형 avg {def_str})")
+        for d in details:
+            print(f" {d}")
     print("=" * W)
 
     # 기간 변동률
@@ -441,18 +549,17 @@ def main():
                 print(f"   - {e}")
         return
 
+    # 경기사이클 판정
+    cycle_result = assess_cycle(indicators)
+
     # print_dashboard가 sentiment를 반환 → 이중 호출 제거
-    sentiment, reasons = print_dashboard(indicators)
+    sentiment, reasons = print_dashboard(indicators, cycle_result=cycle_result)
 
     # 히스토리 저장
-    path = save_history(indicators, sentiment, reasons)
+    phase, details, _, _ = cycle_result
+    path = save_history(indicators, sentiment, reasons, cycle_phase=phase, cycle_details=details)
     print(f" 히스토리 저장: {path}")
 
-    # 기존 히스토리 파일 이동 안내
-    old_dir = pathlib.Path(__file__).resolve().parent.parent / "macro" / "history"
-    if old_dir.exists() and any(old_dir.glob("*.json")):
-        print(f"\n [!] 기존 히스토리 파일이 {old_dir} 에 남아있습니다.")
-        print(f"     → {HISTORY_DIR} 로 이동해주세요.")
 
 
 if __name__ == "__main__":
