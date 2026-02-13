@@ -8,7 +8,15 @@
       "WebFetch(domain:paohuee.medium.com)",
       "WebFetch(domain:intercom.help)",
       "WebFetch(domain:dataguide.cryptoquant.com)",
-      "Bash(timeout:*)"
+      "Bash(timeout:*)",
+      "Bash(findstr:*)",
+      "WebFetch(domain:edition.cnn.com)",
+      "Bash(pip install:*)",
+      "WebFetch(domain:finvizfinance.readthedocs.io)",
+      "WebFetch(domain:github.com)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(del _check_own.py)",
+      "Bash(pip freeze:*)"
     ]
   }
 }

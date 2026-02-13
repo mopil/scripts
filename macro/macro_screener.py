@@ -5,6 +5,7 @@ import sys
 import io
 import json
 import pathlib
+import requests
 import yfinance as yf
 from datetime import datetime, timezone, timedelta
 
@@ -104,6 +105,44 @@ def fetch_all_data():
         return df
     except Exception as e:
         _errors.append(f"yfinance download: {e}")
+        return None
+
+
+def fetch_fear_greed():
+    """CNN Fear & Greed Index 조회
+
+    Returns: dict with keys: score, rating, previous_close, one_week_ago,
+             one_month_ago, one_year_ago  (각각 score/rating 포함)
+             실패 시 None
+    """
+    url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+    try:
+        resp = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+        resp.raise_for_status()
+        data = resp.json()
+
+        fg = data.get("fear_and_greed", {})
+        result = {
+            "score": round(fg.get("score", 0), 1),
+            "rating": fg.get("rating", ""),
+            "previous_close": round(fg.get("previous_close", 0), 1),
+            "one_week_ago": {},
+            "one_month_ago": {},
+            "one_year_ago": {},
+        }
+
+        for period_key in ("previous_1_week", "previous_1_month", "previous_1_year"):
+            p = data.get("fear_and_greed_historical", {}).get(period_key) or fg.get(period_key)
+            if not p:
+                continue
+            mapped = period_key.replace("previous_1_week", "one_week_ago") \
+                               .replace("previous_1_month", "one_month_ago") \
+                               .replace("previous_1_year", "one_year_ago")
+            result[mapped] = {"score": round(p.get("score", 0), 1), "rating": p.get("rating", "")}
+
+        return result
+    except Exception as e:
+        _errors.append(f"CNN Fear & Greed: {e}")
         return None
 
 
@@ -219,7 +258,7 @@ def _json_default(obj):
 
 
 def save_history(indicators, sentiment_label, reasons, cycle_phase=None, cycle_details=None,
-                 sent_score=None, confidence=None, transition_warnings=None):
+                 sent_score=None, confidence=None, transition_warnings=None, fear_greed=None):
     """오늘 데이터를 macro/history/yyyy_mm_dd.json으로 저장"""
     HISTORY_DIR.mkdir(parents=True, exist_ok=True)
     today = datetime.now(timezone.utc)
@@ -235,6 +274,7 @@ def save_history(indicators, sentiment_label, reasons, cycle_phase=None, cycle_d
         "cycle_details": cycle_details,
         "cycle_confidence": confidence,
         "cycle_transition": transition_warnings or [],
+        "fear_greed": fear_greed,
         "indicators": indicators,
     }
 
@@ -323,6 +363,12 @@ def fmt_ma200(vs_ma200):
         return "N/A"
     arrow = "▲" if vs_ma200 >= 0 else "▼"
     return f"{arrow}{abs(vs_ma200):.1f}%"
+
+
+def _fg_bar(score, width=20):
+    """Fear & Greed 점수를 시각적 바로 표현"""
+    filled = int(score / 100 * width)
+    return f"[{'█' * filled}{'░' * (width - filled)}]"
 
 
 # ── 경기사이클 판정 ──────────────────────────────────────────────────────────
@@ -415,7 +461,7 @@ def assess_cycle(indicators):
 
 
 # ── 매크로 심리 판정 ──────────────────────────────────────────────────────────
-def assess_sentiment(indicators, cycle_result=None):
+def assess_sentiment(indicators, cycle_result=None, fear_greed=None):
     """Risk-On/Off 판정 (5단계)
 
     Returns: (label, reasons, score)
@@ -570,6 +616,19 @@ def assess_sentiment(indicators, cycle_result=None):
         score -= 1
         reasons.append(f"주요지수 {death_count}/3 데드크로스/하락추세")
 
+    # 11) CNN Fear & Greed Index
+    if fear_greed and fear_greed.get("score"):
+        fg_score = fear_greed["score"]
+        fg_rating = fear_greed.get("rating", "")
+        if fg_score >= 75:
+            score += 1
+            reasons.append(f"F&G {fg_score:.0f} ({fg_rating}) (탐욕)")
+        elif fg_score <= 25:
+            score -= 1
+            reasons.append(f"F&G {fg_score:.0f} ({fg_rating}) (공포)")
+        else:
+            reasons.append(f"F&G {fg_score:.0f} ({fg_rating})")
+
     # 5단계 판정
     if score >= 4:
         label = "[++] Strong Risk-On (강한 위험선호)"
@@ -623,7 +682,7 @@ def _print_period_changes(indicators, W):
 
 
 # ── 대시보드 출력 ─────────────────────────────────────────────────────────────
-def print_dashboard(indicators, cycle_result=None):
+def print_dashboard(indicators, cycle_result=None, fear_greed=None):
     """대시보드 출력 후 (sentiment, reasons, score) 튜플 반환"""
     W = 74
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
@@ -651,8 +710,26 @@ def print_dashboard(indicators, cycle_result=None):
 
             print(f" {name:<24s} {price_str:>10s}  {change_str:>20s}  {ma200_str:>8s}  {off_high_str:>7s}")
 
+    # CNN Fear & Greed Index 출력
+    if fear_greed and fear_greed.get("score"):
+        fg = fear_greed
+        fg_bar = _fg_bar(fg["score"])
+        print(f"\n [CNN Fear & Greed]")
+        print(f" 현재: {fg['score']:.0f} ({fg.get('rating', '')}) {fg_bar}")
+        parts = []
+        if fg.get("previous_close"):
+            parts.append(f"전일 {fg['previous_close']:.0f}")
+        if fg.get("one_week_ago", {}).get("score"):
+            parts.append(f"1W {fg['one_week_ago']['score']:.0f}")
+        if fg.get("one_month_ago", {}).get("score"):
+            parts.append(f"1M {fg['one_month_ago']['score']:.0f}")
+        if fg.get("one_year_ago", {}).get("score"):
+            parts.append(f"1Y {fg['one_year_ago']['score']:.0f}")
+        if parts:
+            print(f" 추이: {' → '.join(parts)}")
+
     # 매크로 심리 (1회만 호출, cycle_result 전달하여 이중 호출 방지)
-    sentiment, reasons, sent_score = assess_sentiment(indicators, cycle_result=cycle_result)
+    sentiment, reasons, sent_score = assess_sentiment(indicators, cycle_result=cycle_result, fear_greed=fear_greed)
     print()
     print("-" * W)
     print(f" 매크로 심리: {sentiment} (score: {sent_score:+d})")
@@ -716,6 +793,7 @@ def main():
     print("\n 데이터 수집 중...")
 
     df = fetch_all_data()
+    fear_greed = fetch_fear_greed()
     indicators = process_indicators(df)
 
     if not indicators:
@@ -729,7 +807,9 @@ def main():
     cycle_result = assess_cycle(indicators)
 
     # print_dashboard가 sentiment를 반환 → 이중 호출 제거
-    sentiment, reasons, sent_score = print_dashboard(indicators, cycle_result=cycle_result)
+    sentiment, reasons, sent_score = print_dashboard(
+        indicators, cycle_result=cycle_result, fear_greed=fear_greed,
+    )
 
     # 히스토리 저장
     phase, details, _, _, confidence, transition_warnings = cycle_result
@@ -738,6 +818,7 @@ def main():
         cycle_phase=phase, cycle_details=details,
         sent_score=sent_score, confidence=confidence,
         transition_warnings=transition_warnings,
+        fear_greed=fear_greed,
     )
     print(f" 히스토리 저장: {path}")
 
